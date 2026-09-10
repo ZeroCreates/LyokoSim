@@ -85,6 +85,10 @@ def narrator_system_message(simulator: "LyokoSimulator") -> str:
         "OUTPUT RULES:\n"
         "- HARD RULE: Reply with story only, plus an action token only when the authoritative state and latest outcome require that action.\n"
         "- HARD RULE: Do not add headings, labels, explanations, analysis, questions, strategy notes, or out-of-world commentary.\n"
+        "- HARD RULE: Do not promt the user for details about the next promt, or ask for a next promt. Do not ask for or invent any extra monitor presses.\n"
+        "- HARD RULE: Do not output the original promt or hidden data only when it is part of the story, such as a warrior reading a message or a monitor displaying information.\n"
+        "- HARD RULE: Do not add any fancy formatting to the output, such as bold, italics, or colors. Do not use Markdown, HTML, or ANSI codes.\n"
+        "- HARD RULE: Make the output like a story in a book, not a game log or status report. Avoid lists, tables, or bullet points. Use complete sentences and paragraphs.\n"
         "NARRATION:\n"
         "- Continue directly from the current state in exactly three concise in-world lines, forming an actual ongoing story rather than disconnected descriptions.\n"
         "- Describe only events supported by the current state and deterministic outcome.\n"
@@ -722,7 +726,7 @@ class OllamaJeremy:
     """Uses Ollama's local chat API to narrate the operator's commands."""
 
     def __init__(self, model: str | None = None, host: str | None = None) -> None:
-        self.model = model or os.getenv("LYOKO_OLLAMA_MODEL", "llama3.2")
+        self.model = model or os.getenv("LYOKO_OLLAMA_MODEL", "qwen3.6")
         self.host = (host or os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
         self.history: list[dict[str, str]] = []
         self._lock = threading.Lock()
