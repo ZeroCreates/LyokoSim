@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import threading
 import tkinter as tk
@@ -51,7 +52,17 @@ class LyokoControlRoom(tk.Tk):
         self.reply_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.selected_sector = tk.StringVar(value=self.simulator.sectors[0])
         self.selected_warriors: dict[str, tk.BooleanVar] = {}
+        self.windows: dict[str, tk.Toplevel] = {}
+        self.known_virtualized: set[str] = set()
+        self.warrior_card_vars: dict[str, dict[str, tk.StringVar]] = {}
+        self.virtualized_list: tk.Listbox | None = None
         self.sector_menu: ttk.OptionMenu | None = None
+        self.map_canvas: tk.Canvas | None = None
+        self.warrior_frame: ttk.Frame | None = None
+        self.sector_menu_frame: ttk.Frame | None = None
+        self.log_text: tk.Text | None = None
+        self.dialogue_log_path = os.path.join(self.simulator.config.directory, "dialogue.log")
+        self.dialogue_history: list[str] = []
         self.status_text = tk.StringVar(value="SYSTEMS STANDBY")
         self.integrity_text = tk.StringVar(value="SYSTEM INTEGRITY 100%")
         self._build_styles()
@@ -60,66 +71,247 @@ class LyokoControlRoom(tk.Tk):
         self._draw_map()
         self.after(100, self._drain_replies)
         self.after(1000, self._refresh_config)
+        self.after(250, self._sync_warrior_windows)
 
     def _build_styles(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
         style.configure("Panel.TFrame", background=self.COLORS["panel"])
+        style.configure("Menu.TFrame", background="#07151c")
         style.configure("Panel.TLabel", background=self.COLORS["panel"], foreground=self.COLORS["text"])
         style.configure("Muted.TLabel", background=self.COLORS["panel"], foreground=self.COLORS["muted"])
-        style.configure("Title.TLabel", background=self.COLORS["bg"], foreground=self.COLORS["cyan"], font=("Segoe UI", 18, "bold"))
+        style.configure("Title.TLabel", background=self.COLORS["panel"], foreground=self.COLORS["cyan"], font=("Consolas", 18, "bold"))
         style.configure("Section.TLabel", background=self.COLORS["panel"], foreground=self.COLORS["cyan"], font=("Segoe UI", 10, "bold"))
-        style.configure("Action.TButton", background=self.COLORS["panel_light"], foreground=self.COLORS["text"], padding=(12, 8), font=("Segoe UI", 10, "bold"))
+        style.configure("Menu.TButton", background="#102b35", foreground=self.COLORS["cyan"], padding=(12, 11), font=("Consolas", 10, "bold"))
+        style.configure("Action.TButton", background=self.COLORS["panel_light"], foreground=self.COLORS["text"], padding=(12, 8), font=("Consolas", 10, "bold"))
+        style.configure("Danger.TButton", background="#3a1d2a", foreground=self.COLORS["red"], padding=(12, 9), font=("Consolas", 10, "bold"))
+        style.configure("TCheckbutton", background=self.COLORS["panel"], foreground=self.COLORS["text"], font=("Consolas", 10))
+        style.configure("TMenubutton", background=self.COLORS["panel_light"], foreground=self.COLORS["cyan"], font=("Consolas", 10))
         style.map("Action.TButton", background=[("active", "#2a4552")])
+        style.map("Menu.TButton", background=[("active", "#1b5360")])
+        style.map("Danger.TButton", background=[("active", "#5d2636")])
 
     def _build_layout(self) -> None:
-        header = ttk.Frame(self, style="Panel.TFrame", padding=(24, 16))
+        self.geometry("520x570")
+        self.minsize(460, 420)
+        header = ttk.Frame(self, style="Menu.TFrame", padding=(28, 24))
         header.pack(fill="x")
-        ttk.Label(header, text="LYOKOSIM", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="  //  JEREMY CONTROL ROOM", style="Muted.TLabel").pack(side="left", pady=(5, 0))
-        ttk.Label(header, textvariable=self.status_text, style="Section.TLabel").pack(side="right", pady=(5, 0))
-        ttk.Label(header, textvariable=self.integrity_text, style="Muted.TLabel").pack(side="right", padx=(0, 24), pady=(5, 0))
-
-        body = ttk.Frame(self, style="Panel.TFrame", padding=(18, 0, 18, 18))
-        body.pack(fill="both", expand=True)
-        left = ttk.Frame(body, style="Panel.TFrame")
-        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
-        right = ttk.Frame(body, style="Panel.TFrame", width=330)
-        right.pack(side="right", fill="y")
-        right.pack_propagate(False)
-
-        ttk.Label(left, text="VIRTUAL WORLD // LIVE MAP", style="Section.TLabel").pack(anchor="w", pady=(12, 8))
-        self.map_canvas = tk.Canvas(left, bg="#0d1720", highlightthickness=1, highlightbackground=self.COLORS["line"])
-        self.map_canvas.pack(fill="both", expand=True)
-        self.map_canvas.bind("<Configure>", lambda _event: self._draw_map())
-
-        ttk.Label(right, text="MISSION CONTROL", style="Section.TLabel").pack(anchor="w", pady=(12, 8))
-        controls = ttk.Frame(right, style="Panel.TFrame")
-        controls.pack(fill="x")
-        ttk.Button(controls, text="ACTIVATE SYSTEM", command=self._activate, style="Action.TButton").pack(fill="x", pady=3)
-        ttk.Button(controls, text="MONITOR WARRIORS", command=self._monitor, style="Action.TButton").pack(fill="x", pady=3)
-        ttk.Button(controls, text="TRIGGER XANA ATTACK", command=self._xana_attack, style="Action.TButton").pack(fill="x", pady=3)
-        ttk.Button(controls, text="RETURN TO THE PAST", command=self._return_to_past, style="Action.TButton").pack(fill="x", pady=3)
-
-        ttk.Label(right, text="WARRIORS TO VIRTUALISE / DEVIRTUALISE", style="Muted.TLabel", wraplength=300).pack(anchor="w", pady=(18, 6))
-        self.warrior_frame = ttk.Frame(right, style="Panel.TFrame")
-        self.warrior_frame.pack(fill="x")
-        ttk.Label(right, text="TARGET SECTOR", style="Muted.TLabel").pack(anchor="w", pady=(14, 4))
-        self.sector_menu_frame = ttk.Frame(right, style="Panel.TFrame")
-        self.sector_menu_frame.pack(fill="x")
-        ttk.Button(right, text="VIRTUALISE SELECTED", command=self._virtualize, style="Action.TButton").pack(fill="x", pady=(9, 3))
-        ttk.Button(right, text="DEVIRTUALISE SELECTED", command=self._devirtualize, style="Action.TButton").pack(fill="x", pady=3)
-
-        ttk.Label(right, text="SUPERCOMPUTER COMMUNICATIONS", style="Section.TLabel").pack(anchor="w", pady=(20, 6))
-        self.log_text = tk.Text(right, height=12, bg="#0d1720", fg=self.COLORS["text"], insertbackground=self.COLORS["text"], relief="flat", padx=10, pady=8, wrap="word", font=("Consolas", 9))
-        self.log_text.pack(fill="both", expand=True)
-        self.log_text.configure(state="disabled")
+        ttk.Label(header, text="LYOKOSIM", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(header, text="JEREMY // SUPERCOMPUTER INTERFACE", style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
+        ttk.Label(header, textvariable=self.status_text, style="Section.TLabel").pack(anchor="w", pady=(18, 0))
+        ttk.Label(header, textvariable=self.integrity_text, style="Muted.TLabel").pack(anchor="w", pady=(3, 0))
+        menu = ttk.Frame(self, style="Menu.TFrame", padding=(28, 6, 28, 24))
+        menu.pack(fill="both", expand=True)
+        ttk.Label(menu, text="OPEN INTERFACE MODULE", style="Section.TLabel").pack(anchor="w", pady=(8, 10))
+        for title, key, command in (
+            ("MISSION CONTROL", "control", self._open_control_window),
+            ("LIVE LYOKO MAP", "map", self._open_map_window),
+            ("VIRTUALISATION DECK", "virtualize", self._open_virtualize_window),
+            ("VIRTUALISED WARRIORS", "warriors", self._open_virtualized_window),
+            ("SUPERCOMPUTER DIALOGUE", "dialogue", self._open_dialogue_window),
+        ):
+            ttk.Button(menu, text=f"{title}  //  OPEN", command=command, style="Menu.TButton").pack(fill="x", pady=4)
+        ttk.Separator(menu).pack(fill="x", pady=14)
+        ttk.Button(menu, text="EXIT LYOKOSIM", command=self.destroy, style="Danger.TButton").pack(fill="x", pady=4)
+        self._open_control_window()
         self._log("SYSTEM", f"Control room online. Configuration: {self.simulator.config.directory}")
         if self.startup_error:
             self._log("SYSTEM", f"Narrator fallback: {self.startup_error}")
 
+    def _new_window(self, key: str, title: str, geometry: str) -> tk.Toplevel | None:
+        existing = self.windows.get(key)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            return None
+        window = tk.Toplevel(self)
+        window.title(f"LyokoSim // {title}")
+        window.geometry(geometry)
+        window.configure(bg=self.COLORS["bg"])
+        window.protocol("WM_DELETE_WINDOW", lambda: self._close_window(key))
+        self.windows[key] = window
+        return window
+
+    def _close_window(self, key: str) -> None:
+        window = self.windows.pop(key, None)
+        if window is not None and window.winfo_exists():
+            window.destroy()
+        if key == "map":
+            self.map_canvas = None
+        elif key == "virtualize":
+            self.warrior_frame = None
+            self.sector_menu_frame = None
+            self.sector_menu = None
+        elif key == "dialogue":
+            self.log_text = None
+        elif key == "warriors":
+            self.virtualized_list = None
+        elif key.startswith("warrior:"):
+            self.warrior_card_vars.pop(key.split(":", 1)[1], None)
+
+    def _open_control_window(self) -> None:
+        window = self._new_window("control", "Mission Control", "390x430")
+        if window is None:
+            return
+        content = ttk.Frame(window, style="Panel.TFrame", padding=22)
+        content.pack(fill="both", expand=True)
+        ttk.Label(content, text="MISSION CONTROL", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(content, text="COMMAND DECK // EARTH SIDE", style="Muted.TLabel").pack(anchor="w", pady=(4, 20))
+        for text, command in (("ACTIVATE SYSTEM", self._activate), ("MONITOR WARRIORS", self._monitor), ("TRIGGER XANA ATTACK", self._xana_attack), ("RETURN TO THE PAST", self._return_to_past)):
+            ttk.Button(content, text=text, command=command, style="Action.TButton").pack(fill="x", pady=5)
+        ttk.Separator(content).pack(fill="x", pady=16)
+        ttk.Label(content, text="SYSTEM STATUS", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(content, textvariable=self.status_text, style="Muted.TLabel").pack(anchor="w", pady=(6, 2))
+        ttk.Label(content, textvariable=self.integrity_text, style="Muted.TLabel").pack(anchor="w")
+
+    def _open_map_window(self) -> None:
+        window = self._new_window("map", "Live Lyoko Map", "900x650")
+        if window is None:
+            return
+        frame = ttk.Frame(window, style="Panel.TFrame", padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="LYOKO // SECTOR NETWORK", style="Title.TLabel").pack(anchor="w", pady=(0, 8))
+        self.map_canvas = tk.Canvas(frame, bg="#07151c", highlightthickness=1, highlightbackground=self.COLORS["cyan"])
+        self.map_canvas.pack(fill="both", expand=True)
+        self.map_canvas.bind("<Configure>", lambda _event: self._draw_map())
+        self._draw_map()
+
+    def _open_virtualize_window(self) -> None:
+        window = self._new_window("virtualize", "Virtualisation Deck", "430x600")
+        if window is None:
+            return
+        content = ttk.Frame(window, style="Panel.TFrame", padding=22)
+        content.pack(fill="both", expand=True)
+        ttk.Label(content, text="VIRTUALISATION DECK", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(content, text="SELECT WARRIORS // DESTINATION SECTOR", style="Muted.TLabel").pack(anchor="w", pady=(4, 16))
+        self.warrior_frame = ttk.Frame(content, style="Panel.TFrame")
+        self.warrior_frame.pack(fill="x")
+        ttk.Label(content, text="TARGET SECTOR", style="Section.TLabel").pack(anchor="w", pady=(22, 5))
+        self.sector_menu_frame = ttk.Frame(content, style="Panel.TFrame")
+        self.sector_menu_frame.pack(fill="x")
+        ttk.Button(content, text="VIRTUALISE SELECTED", command=self._virtualize, style="Action.TButton").pack(fill="x", pady=(14, 5))
+        ttk.Button(content, text="DEVIRTUALISE SELECTED", command=self._devirtualize, style="Action.TButton").pack(fill="x", pady=5)
+        self._rebuild_config_controls()
+
+    def _open_virtualized_window(self) -> None:
+        window = self._new_window("warriors", "Virtualised Warriors", "420x500")
+        if window is None:
+            return
+        frame = ttk.Frame(window, style="Panel.TFrame", padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="VIRTUALISED WARRIORS", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(frame, text="ENTITY REGISTRY // OPEN A LIVE CARD", style="Muted.TLabel").pack(anchor="w", pady=(4, 14))
+        self.virtualized_list = tk.Listbox(
+            frame,
+            bg="#061118",
+            fg=self.COLORS["cyan"],
+            selectbackground="#1b5360",
+            selectforeground=self.COLORS["text"],
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self.COLORS["line"],
+            font=("Consolas", 11),
+            activestyle="none",
+        )
+        self.virtualized_list.pack(fill="both", expand=True)
+        self.virtualized_list.bind("<Double-Button-1>", lambda _event: self._open_selected_warrior_card())
+        ttk.Button(frame, text="OPEN SELECTED ENTITY CARD", command=self._open_selected_warrior_card, style="Action.TButton").pack(fill="x", pady=(12, 4))
+        ttk.Label(frame, text="Cards update with movement, health, and mission state.", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
+        self._refresh_virtualized_list()
+
+    def _open_selected_warrior_card(self) -> None:
+        if self.virtualized_list is None:
+            return
+        selection = self.virtualized_list.curselection()
+        if selection:
+            self._open_warrior_card(self.virtualized_list.get(selection[0]))
+
+    def _open_warrior_card(self, name: str) -> None:
+        warrior = self.simulator.state.warriors.get(name)
+        if warrior is None or not warrior.virtualized:
+            return
+        key = f"warrior:{name}"
+        window = self._new_window(key, f"Entity // {name}", "330x330")
+        if window is None:
+            return
+        frame = ttk.Frame(window, style="Panel.TFrame", padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=name.upper(), style="Title.TLabel").pack(anchor="w")
+        ttk.Label(frame, text="LYOKO ENTITY CARD", style="Muted.TLabel").pack(anchor="w", pady=(3, 18))
+        values = {
+            "role": tk.StringVar(),
+            "sector": tk.StringVar(),
+            "health": tk.StringVar(),
+            "status": tk.StringVar(),
+        }
+        self.warrior_card_vars[name] = values
+        for label, key_name in (("ROLE", "role"), ("SECTOR", "sector"), ("HEALTH", "health"), ("STATUS", "status")):
+            row = ttk.Frame(frame, style="Panel.TFrame")
+            row.pack(fill="x", pady=5)
+            ttk.Label(row, text=label, style="Section.TLabel", width=10).pack(side="left")
+            ttk.Label(row, textvariable=values[key_name], style="Panel.TLabel").pack(side="left", fill="x", expand=True)
+        ttk.Button(frame, text="CLOSE ENTITY CARD", command=lambda: self._close_window(key), style="Action.TButton").pack(fill="x", pady=(20, 0))
+        self._refresh_warrior_card(name)
+
+    def _refresh_warrior_card(self, name: str) -> None:
+        values = self.warrior_card_vars.get(name)
+        warrior = self.simulator.state.warriors.get(name)
+        if values is None or warrior is None or not warrior.virtualized:
+            return
+        values["role"].set(warrior.role)
+        values["sector"].set(warrior.location or "UNKNOWN")
+        values["health"].set(f"{warrior.health}%" + (" // PROTECTED" if self.simulator._is_protected_warrior(warrior) else ""))
+        values["status"].set("VIRTUALISED // ACTIVE")
+
+    def _refresh_virtualized_list(self) -> None:
+        if self.virtualized_list is None:
+            return
+        selected = self.virtualized_list.curselection()
+        selected_name = self.virtualized_list.get(selected[0]) if selected else None
+        self.virtualized_list.delete(0, "end")
+        names = [name for name, warrior in self.simulator.state.warriors.items() if warrior.virtualized]
+        for name in names:
+            self.virtualized_list.insert("end", name)
+        if selected_name in names:
+            self.virtualized_list.selection_set(names.index(selected_name))
+
+    def _sync_warrior_windows(self) -> None:
+        current = {name for name, warrior in self.simulator.state.warriors.items() if warrior.virtualized}
+        for name in current - self.known_virtualized:
+            self._open_warrior_card(name)
+        for name in self.known_virtualized - current:
+            self._close_window(f"warrior:{name}")
+        self.known_virtualized = current
+        self._refresh_virtualized_list()
+        for name in current:
+            self._refresh_warrior_card(name)
+        self.after(250, self._sync_warrior_windows)
+
+    def _open_dialogue_window(self) -> None:
+        window = self._new_window("dialogue", "Supercomputer Dialogue", "680x560")
+        if window is None:
+            return
+        frame = ttk.Frame(window, style="Panel.TFrame", padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="SUPERCOMPUTER // COMMUNICATIONS LOG", style="Title.TLabel").pack(anchor="w", pady=(0, 8))
+        self.log_text = tk.Text(frame, bg="#061118", fg=self.COLORS["text"], insertbackground=self.COLORS["text"], relief="flat", padx=14, pady=12, wrap="word", font=("Consolas", 10))
+        self.log_text.pack(fill="both", expand=True)
+        self.log_text.configure(state="disabled")
+        if not self.dialogue_history and os.path.exists(self.dialogue_log_path):
+            try:
+                with open(self.dialogue_log_path, encoding="utf-8") as file:
+                    self.dialogue_history = file.read().splitlines()
+            except OSError:
+                pass
+        if self.dialogue_history:
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", "\n".join(self.dialogue_history) + "\n")
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
+        ttk.Label(frame, text=f"ARCHIVE: {self.dialogue_log_path}", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
+
     def _draw_map(self) -> None:
-        if not hasattr(self, "map_canvas"):
+        if self.map_canvas is None:
             return
         self.map_canvas.delete("all")
         width = max(self.map_canvas.winfo_width(), 780)
@@ -191,6 +383,8 @@ class LyokoControlRoom(tk.Tk):
             name: self.selected_warriors.get(name, tk.BooleanVar(value=name in {"Aelita", "Odd"}))
             for name in self.simulator.warrior_names
         }
+        if self.warrior_frame is None or self.sector_menu_frame is None:
+            return
         for child in self.warrior_frame.winfo_children():
             child.destroy()
         for name in self.simulator.warrior_names:
@@ -226,6 +420,7 @@ class LyokoControlRoom(tk.Tk):
         self._log("JEREMY", command)
         self._log("SYSTEM", outcome)
         self.speaker.speak_async(outcome)
+        self._report_tts_error()
         self._draw_map()
         threading.Thread(target=self._get_reply, args=(command, outcome), daemon=True).start()
 
@@ -242,7 +437,9 @@ class LyokoControlRoom(tk.Tk):
         while not self.reply_queue.empty():
             spoken_reply, display_reply = self.reply_queue.get_nowait()
             self._log(self.provider.upper(), display_reply)
-            self.speaker.speak_async(spoken_reply)
+            self.speaker.speak_async(display_reply)
+            self._report_tts_error()
+            self._draw_map()
             if self.simulator.state.mission_successful and self.simulator.state.tower_active:
                 try:
                     outcome = self.simulator.deactivate_tower()
@@ -252,7 +449,14 @@ class LyokoControlRoom(tk.Tk):
                     self._log("SYSTEM", outcome)
                     self.status_text.set("MISSION COMPLETE")
                     self._draw_map()
+                self._report_tts_error()
         self.after(100, self._drain_replies)
+
+    def _report_tts_error(self) -> None:
+        if self.speaker.error:
+            message = f"TTS ERROR: {self.speaker.error}"
+            if not self.dialogue_history or message not in self.dialogue_history[-1]:
+                self._log("SYSTEM", message)
 
     def _activate(self) -> None:
         self._execute("Activate the system", self.simulator.activate_system)
@@ -276,10 +480,22 @@ class LyokoControlRoom(tk.Tk):
             self._execute("Return to the past", self.simulator.return_to_past)
 
     def _log(self, speaker: str, message: str) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{speaker}] {message}\n\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+        entry = f"[{speaker}] {message}"
+        self.dialogue_history.append(entry)
+        try:
+            with open(self.dialogue_log_path, "a", encoding="utf-8") as file:
+                file.write(entry + "\n")
+        except OSError:
+            pass
+        if self.log_text is None:
+            return
+        try:
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", entry + "\n\n")
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
+        except tk.TclError:
+            self.log_text = None
 
 
 def main() -> None:
