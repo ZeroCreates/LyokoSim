@@ -1,0 +1,3 @@
+# The simulator uses Python's standard library for the Ollama HTTP API.
+# Install the Ollama desktop/server separately: https://ollama.com/download
+pyttsx3>=2.90
