@@ -31,6 +31,16 @@ Warrior entries can include an editable role used by the AI narrator:
 }
 ```
 
+Add a `weapon` field to give the AI and UI the warrior's configured weapon:
+
+```json
+{
+	"name": "Ulrich",
+	"role": "Melee fighter and frontline defender",
+	"weapon": "Sword"
+}
+```
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -70,7 +80,7 @@ Launch the interactive map UI with:
 python lyoko_ui.py --provider ollama
 ```
 
-The launcher opens separate Code Lyoko-style interface modules: **MISSION CONTROL**, **LIVE LYOKO MAP**, **VIRTUALISATION DECK**, **VIRTUALISED WARRIORS**, and **SUPERCOMPUTER DIALOGUE**. Open or close them independently from the main menu; they share the same live simulation. Virtualising a warrior opens a live entity card showing their role, sector, health, and status. Close cards and reopen them from the **VIRTUALISED WARRIORS** registry at any time. Use **ACTIVATE SYSTEM** to bring the supercomputer online; only XANA activates Lyoko towers. The map shows the active XANA tower and virtualised warriors. A mission lasts exactly 10 monitor presses. XANA attacks reduce virtualised warrior health; the AI may request `[DEVIRTUALISE Warrior Name]` when a warrior reaches 0 health. Tower specialists/deactivators are protected from death. The dialogue window archives communications to `dialogue.log` in the LyokoSim configuration directory. The AI supplies communications and outcome narration, and may request movement with `[MOVE Warrior Name TO Sector]`. The simulator only accepts moves through configured connections that bring warriors closer to XANA's active tower.
+The launcher opens separate Code Lyoko-style interface modules: **MISSION CONTROL**, **LIVE LYOKO MAP**, **VIRTUALISATION DECK**, **VIRTUALISED WARRIORS**, and **SUPERCOMPUTER DIALOGUE**. Open or close them independently from the main menu; they share the same live simulation. Virtualising a warrior opens a live entity card showing their role, sector, health, and status. Close cards and reopen them from the **VIRTUALISED WARRIORS** registry at any time. Use **ACTIVATE SYSTEM** to bring the supercomputer online; only XANA activates Lyoko towers. The map shows the active XANA tower and virtualised warriors. A mission lasts exactly 10 monitor presses and cannot finish until at least one warrior has been devirtualised. XANA attacks reduce virtualised warrior health; the AI may request `[DEVIRTUALISE Warrior Name]` when a warrior reaches 0 health. The configured tower specialist/deactivator reaches the active tower and performs its Aelita-like deactivation role; that role is protected from death. The dialogue window archives communications to `dialogue.log` in the LyokoSim configuration directory. The AI supplies story narration and only the action tokens required by the state, and may request movement with `[MOVE Warrior Name TO Sector]`. The simulator only accepts moves through configured connections that bring warriors closer to XANA's active tower.
 
 The UI also accepts `--provider openai` and uses `OPENAI_API_KEY`, or `--provider none` for offline play. XANA can attack manually with **TRIGGER XANA ATTACK**, and also attacks during monitoring. Attacks reduce warrior health and system integrity; at zero integrity, the tower goes offline.
 

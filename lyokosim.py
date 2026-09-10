@@ -3,45 +3,51 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import queue
 import random
 import re
+import secrets
 import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
-
 
 DEFAULT_WARRIORS = ("Aelita", "Ulrich", "Odd", "Yumi", "William")
 DEFAULT_WARRIOR_CONFIG = [
-    {"name": "Aelita", "role": "Tower and virtual-world specialist"},
-    {"name": "Ulrich", "role": "Melee fighter and frontline defender"},
-    {"name": "Odd", "role": "Ranged fighter and reconnaissance specialist"},
-    {"name": "Yumi", "role": "Ranged fighter and telekinesis specialist"},
-    {"name": "William", "role": "Heavy close-combat fighter"},
+    {"name": "Aelita", "role": "Tower and virtual-world specialist", "weapon": "Energy fields"},
+    {"name": "Ulrich", "role": "Melee fighter and frontline defender", "weapon": "2 Katanas"},
+    {"name": "Odd", "role": "Ranged fighter and reconnaissance specialist", "weapon": "Laser arrows"},
+    {"name": "Yumi", "role": "Ranged fighter and telekinesis specialist", "weapon": "2 Telekinetic fans"},
+    {"name": "William", "role": "Heavy close-combat fighter", "weapon": "Great Sword"},
 ]
 DEFAULT_SECTORS = ("Forest", "Desert", "Ice", "Mountain", "Carith")
 DEFAULT_SECTOR_CONFIG = [
-    {"name": "Forest", "towers": 10, "color": "#254638", "connections": ["Mountain", "Desert"]},
-    {"name": "Desert", "towers": 10, "color": "#69502b", "connections": ["Forest", "Carith"]},
-    {"name": "Ice", "towers": 10, "color": "#255062", "connections": ["Mountain", "Carith"]},
-    {"name": "Mountain", "towers": 10, "color": "#38485b", "connections": ["Forest", "Ice"]},
-    {"name": "Carith", "towers": 1, "color": "#563c54", "connections": ["Desert", "Ice"]},
+  {"name": "Forest","towers": 10,"color": "#254638","connections": ["Mountain","Desert","Ice","Carith"]},
+  {"name": "Desert","towers": 10,"color": "#69502b","connections": ["Forest","Mountain","Ice","Carith"]},
+  {"name": "Ice","towers": 10,"color": "#255062","connections": ["Mountain","Forest","Desert","Carith"]},
+  {"name": "Mountain","towers": 10,"color": "#38485b","connections": ["Forest","Ice","Desert","Carith"]},
+  {"name": "Carith","towers": 1,"color": "#563c54","connections": ["Desert","Ice","Forest","Mountain"]}
 ]
+
 DEFAULT_SECTOR_COLORS = {sector["name"]: sector["color"] for sector in DEFAULT_SECTOR_CONFIG}
 NARRATOR_PROVIDERS = ("ollama", "openai", "none")
 EPISODE_GUIDE = (
+    "The supercomputer is housed in the control room of the abandoned factory near Kadic Academy. "
     "A usual Code Lyoko episode begins in the real world at Kadic Academy, where XANA activates "
-    "a tower and creates a threat. Jeremy activates the supercomputer system, detects it in the lab, "
+    "a tower and creates a threat. Jeremy travels to the factory control room, activates the "
+    "supercomputer system, and detects the threat there, "
     "sends the warriors to Lyoko, and "
     "the team travels through the connected sectors while fighting XANA's monsters. The warriors "
-    "must reach the activated tower; Aelita enters it and deactivates it, the real-world threat "
-    "ends, and Jeremy uses Return to the Past to undo the damage. LyokoSim compresses that pattern: "
+    "must reach the activated tower; the configured tower specialist/deactivator enters it and "
+    "deactivates it, the real-world threat ends, and Jeremy uses Return to the Past to undo the damage. "
+    "LyokoSim compresses that pattern: "
     "monitor presses are story beats, XANA's possessed tower is the target, movement follows the "
-    "configured sector connections, and the mission ends after exactly 10 monitor presses."
+    "configured sector connections, at least one warrior must leave Lyoko before the mission can end, "
+    "and the mission ends after exactly 10 monitor presses."
 )
 
 
@@ -64,14 +70,21 @@ def narrator_system_message(simulator: "LyokoSimulator") -> str:
         "- Never invent, rename, remove, or alter warriors, roles, sectors, towers, connections, locations, health, integrity, progress, attacks, or outcomes.\n"
         "- A tower name identifies a specific tower; a sector name identifies a sector. Do not treat them as interchangeable.\n"
         "- All warrior names and roles come from the user's configuration and may be completely custom. Do not assume any configured warrior is Aelita, Ulrich, Odd, Yumi, William, or any other show character.\n"
-        "- Use each configured warrior's exact custom name. Infer abilities only from that warrior's configured role, never from their name or a show stereotype.\n"
+        "- Use each configured warrior's exact custom name. Infer abilities only from that warrior's configured role and weapon, never from their name or a show stereotype.\n"
+        "- Use a warrior's configured weapon exactly as written; never invent, replace, or assume a weapon.\n"
         "- The configured warrior whose role identifies them as a tower specialist, tower deactivator, or tower deactivation specialist performs the Aelita-like objective: reaching the active tower and deactivating it. Their custom name does not change this function.\n"
+        "- Follow the episode guide closely: preserve its setting, sequence, roles, cause-and-effect, and Code Lyoko tone.\n"
+        "- Keep the story original by inventing new scene details, dialogue, threats, reactions, and transitions; do not copy an episode or contradict the guide.\n"
         "- The mission requires exactly 10 monitor presses. Each monitor press is one story beat; never claim the mission is complete earlier.\n"
+        "- At least one warrior must be devirtualised before the mission can end. This is a real mission requirement, not optional drama.\n"
         "COMMAND STORY PROGRESSION:\n"
         "- Every successful command advances the story. Treat the deterministic outcome as the latest canon event and continue the story from it.\n"
         "- A successful monitor command advances the numeric story_progress by exactly one and creates one major story beat: describe the new threat, Lyoko situation, warrior health, or mission development shown by the outcome.\n"
         "- A successful virtualise command is also a story event: narrate the warriors' arrival in their configured sector and the beginning or continuation of their mission. Virtualisation does not add a monitor press or falsely complete the mission.\n"
         "- Do not answer a successful monitor or virtualise command with a bare status report, summary, or unrelated scene. Make it a continuing in-world story moment.\n"
+        "OUTPUT RULES:\n"
+        "- Reply with story only, plus an action token only when the authoritative state and latest outcome require that action.\n"
+        "- Do not add headings, labels, explanations, analysis, questions, strategy notes, or out-of-world commentary.\n"
         "NARRATION:\n"
         "- Continue directly from the current state in exactly three concise in-world lines, forming an actual ongoing story rather than disconnected descriptions.\n"
         "- Describe only events supported by the current state and deterministic outcome.\n"
@@ -99,6 +112,8 @@ def narrator_system_message(simulator: "LyokoSimulator") -> str:
         "- Never move away from the target, remain in place, invent a route, assume a connection, or request movement for a non-virtualised warrior.\n"
         "- If any movement condition is uncertain, omit the token. The simulator is the final validator and may reject a request.\n"
         "- A rejected request is not movement; do not describe it as successful.\n"
+        "- Use the authoritative movement_options list: move each warrior only to one of that warrior's legal_next_sectors, never to an arbitrary sector.\n"
+        "- If a virtualised warrior is not already in target_sector and has a legal_next_sectors entry, always include a MOVE token for that warrior; the simulator also enforces this progression.\n"
         "HEALTH TOKEN:\n"
         "- Use [HEALTH Warrior Name TO Number] only to apply a health value explicitly supported by the deterministic outcome.\n"
         "- Number must be an integer from 0 to 100, and the exact warrior name must be currently virtualised.\n"
@@ -114,6 +129,7 @@ def narrator_system_message(simulator: "LyokoSimulator") -> str:
         "- After a devirtualisation request is accepted, describe that warrior as off Lyoko and no longer participating.\n"
         "MISSION END:\n"
         "- If mission_successful is false, the mission is not complete: never claim victory and never use [DEACTIVATE_TOWER].\n"
+        "- Never claim mission success while devirtualized_warriors is empty. At least one warrior must have left Lyoko.\n"
         "- If mission_successful is true, clearly narrate victory and end the final line with exactly [DEACTIVATE_TOWER].\n"
         "- Use [DEACTIVATE_TOWER] only in that successful state, exactly once, at the very end; it is a request for Jeremy, not an action you perform.\n"
         "- If the tower is offline or the timeline was reset, report only the state shown by the simulator and do not invent a new mission.\n"
@@ -137,6 +153,8 @@ class ConfigManager:
     def _ensure_defaults(self) -> None:
         if not os.path.exists(self.warriors_path):
             self._write_json(self.warriors_path, DEFAULT_WARRIOR_CONFIG)
+        else:
+            self._migrate_legacy_warriors()
         if not os.path.exists(self.sectors_path):
             self._write_json(self.sectors_path, DEFAULT_SECTOR_CONFIG)
         else:
@@ -150,6 +168,18 @@ class ConfigManager:
             return
         if isinstance(values, list) and tuple(values) == DEFAULT_SECTORS:
             self._write_json(self.sectors_path, DEFAULT_SECTOR_CONFIG)
+
+    def _migrate_legacy_warriors(self) -> None:
+        try:
+            with open(self.warriors_path, encoding="utf-8") as file:
+                values = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(values, list):
+            return
+        names = tuple(value.get("name") if isinstance(value, dict) else value for value in values)
+        if names == DEFAULT_WARRIORS and all(isinstance(value, str) or "weapon" not in value for value in values):
+            self._write_json(self.warriors_path, DEFAULT_WARRIOR_CONFIG)
 
     @staticmethod
     def _write_json(path: str, value: list[Any]) -> None:
@@ -169,14 +199,17 @@ class ConfigManager:
         warriors: list[dict[str, str]] = []
         for value in values:
             if isinstance(value, str) and value.strip():
-                value = {"name": value.strip(), "role": "Warrior"}
+                value = {"name": value.strip(), "role": "Warrior", "weapon": "Unknown weapon"}
             if not isinstance(value, dict):
                 raise RuntimeError("Each warrior must be a name string or an object with name and role.")
             name = value.get("name")
             role = value.get("role", "Warrior")
-            if not isinstance(name, str) or not name.strip() or not isinstance(role, str) or not role.strip():
-                raise RuntimeError("Each warrior needs a non-empty name and role.")
-            warriors.append({"name": name.strip(), "role": role.strip()})
+            weapon = value.get("weapon", "Unknown weapon")
+            if (not isinstance(name, str) or not name.strip() or
+                    not isinstance(role, str) or not role.strip() or
+                    not isinstance(weapon, str) or not weapon.strip()):
+                raise RuntimeError("Each warrior needs a non-empty name, role, and weapon.")
+            warriors.append({"name": name.strip(), "role": role.strip(), "weapon": weapon.strip()})
         names = tuple(warrior["name"] for warrior in warriors)
         if len(set(names)) != len(names):
             raise RuntimeError(f"Warriors configuration contains duplicate names: {path}")
@@ -220,10 +253,41 @@ class ConfigManager:
         return os.path.getmtime(self.warriors_path), os.path.getmtime(self.sectors_path)
 
 
+class AccountManager:
+    """Manage one local LyokoSim account without storing a plaintext password."""
+
+    def __init__(self, directory: str) -> None:
+        self.path = os.path.join(directory, "account.json")
+
+    def exists(self) -> bool:
+        return os.path.exists(self.path)
+
+    def register(self, username: str, password: str) -> None:
+        username = username.strip()
+        if not username or len(password) < 4:
+            raise ValueError("Enter a username and a password of at least 4 characters.")
+        salt = secrets.token_bytes(16)
+        password_hash = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)
+        with open(self.path, "w", encoding="utf-8") as file:
+            json.dump({"username": username, "salt": salt.hex(), "password_hash": password_hash.hex()}, file, indent=2)
+
+    def authenticate(self, username: str, password: str) -> bool:
+        try:
+            with open(self.path, encoding="utf-8") as file:
+                account = json.load(file)
+            salt = bytes.fromhex(account["salt"])
+            expected = bytes.fromhex(account["password_hash"])
+            actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200_000)
+            return hmac.compare_digest(username.strip(), account["username"]) and hmac.compare_digest(actual, expected)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+
 @dataclass
 class Warrior:
     name: str
     role: str = "Warrior"
+    weapon: str = "Unknown weapon"
     virtualized: bool = False
     location: str | None = None
     health: int = 100
@@ -248,6 +312,7 @@ class LyokoState:
     tower_compromised: bool = False
     xana_attacks: int = 0
     last_xana_event: str | None = None
+    devirtualized_warriors: set[str] = field(default_factory=set)
     possessed_towers: set[str] = field(default_factory=set)
     active_tower: str | None = None
     tower_connections_map: dict[str, list[str]] = field(default_factory=dict)
@@ -267,6 +332,7 @@ class LyokoState:
             "tower_compromised": self.tower_compromised,
             "xana_attacks": self.xana_attacks,
             "last_xana_event": self.last_xana_event,
+            "devirtualized_warriors": sorted(self.devirtualized_warriors),
             "possessed_towers": sorted(self.possessed_towers),
             "active_tower": self.active_tower,
             "tower_connections": self.tower_connections_map,
@@ -274,6 +340,7 @@ class LyokoState:
                 name: {
                     "virtualized": warrior.virtualized,
                     "role": warrior.role,
+                    "weapon": warrior.weapon,
                     "location": warrior.location,
                     "health": warrior.health,
                     "protected_from_death": is_protected_warrior(warrior),
@@ -293,6 +360,7 @@ class LyokoSimulator:
         self.warrior_configs, self.sector_configs = self.config.load()
         self.warrior_names = tuple(warrior["name"] for warrior in self.warrior_configs)
         self.warrior_roles = {warrior["name"]: warrior["role"] for warrior in self.warrior_configs}
+        self.warrior_weapons = {warrior["name"]: warrior["weapon"] for warrior in self.warrior_configs}
         self.sectors = tuple(sector["name"] for sector in self.sector_configs)
         self.sector_colors = {sector["name"]: sector["color"] for sector in self.sector_configs}
         self.state = self._new_state()
@@ -304,7 +372,7 @@ class LyokoSimulator:
         state = LyokoState(
             return_requested=return_requested,
             story_length=10,
-            warriors={name: Warrior(name, self.warrior_roles[name]) for name in self.warrior_names},
+            warriors={name: Warrior(name, self.warrior_roles[name], self.warrior_weapons[name]) for name in self.warrior_names},
         )
         state.tower_connections_map = self.tower_connections()
         return state
@@ -319,11 +387,13 @@ class LyokoSimulator:
         for warrior_config in warrior_configs:
             warrior = current.get(warrior_config["name"], Warrior(warrior_config["name"]))
             warrior.role = warrior_config["role"]
+            warrior.weapon = warrior_config["weapon"]
             updated_warriors[warrior.name] = warrior
         self.state.warriors = updated_warriors
         self.warrior_configs = warrior_configs
         self.warrior_names = tuple(warrior["name"] for warrior in warrior_configs)
         self.warrior_roles = {warrior["name"]: warrior["role"] for warrior in warrior_configs}
+        self.warrior_weapons = {warrior["name"]: warrior["weapon"] for warrior in warrior_configs}
         self.sector_configs = sector_configs
         self.sectors = tuple(sector["name"] for sector in sector_configs)
         self.sector_colors = {sector["name"]: sector["color"] for sector in sector_configs}
@@ -338,6 +408,7 @@ class LyokoSimulator:
             {
                 "name": warrior.name,
                 "role": warrior.role,
+                "weapon": warrior.weapon,
                 "sector": warrior.location,
                 "health": warrior.health,
                 "protected_from_death": self._is_protected_warrior(warrior),
@@ -358,6 +429,7 @@ class LyokoSimulator:
             },
             "state": self.state.snapshot(),
             "virtualised_warriors": virtualised_warriors,
+            "movement_options": self.movement_options(),
             "mission_log": self.log[-20:],
         }
 
@@ -369,7 +441,7 @@ class LyokoSimulator:
         if self.state.tower_active:
             return "System is already active."
         self.state.tower_active = True
-        message = "System activated. Lyoko interface is online. XANA controls Lyoko towers."
+        message = "System activated. Lyoko interface is online. XANA Awakens"
         self.log.append(message)
         return message
 
@@ -417,11 +489,18 @@ class LyokoSimulator:
         )
         if self.state.xana_active:
             message += "\n" + self.xana_attack(system_damage=5)
-        if self.state.story_progress >= self.state.story_length and self.state.system_integrity > 0:
+        if self._mission_requirements_met():
             self.state.mission_successful = True
             message += f"\nMission objective complete after {self.state.story_progress} monitoring cycles. Awaiting tower deactivation."
         self.log.append(message)
         return message
+
+    def _mission_requirements_met(self) -> bool:
+        return (
+            self.state.story_progress >= self.state.story_length
+            and self.state.system_integrity > 0
+            and bool(self.state.devirtualized_warriors)
+        )
 
     def deactivate_tower(self) -> str:
         """Deactivate the active tower after the mission has succeeded."""
@@ -535,7 +614,48 @@ class LyokoSimulator:
         return message
 
     def _connected_sectors(self, sector: str) -> list[str]:
-        return [item for config in self.sector_configs if config["name"] == sector for item in config["connections"] if item in self.sectors]
+        connected: set[str] = set()
+        for config in self.sector_configs:
+            if config["name"] == sector:
+                connected.update(item for item in config["connections"] if item in self.sectors)
+            elif sector in config["connections"]:
+                connected.add(config["name"])
+        return sorted(connected)
+
+    def movement_options(self) -> list[dict[str, Any]]:
+        """Return legal next sectors for every currently virtualised warrior."""
+        target = self.state.active_tower.rsplit(" Tower ", 1)[0] if self.state.active_tower else None
+        options = []
+        for warrior in self.state.warriors.values():
+            if not warrior.virtualized or warrior.location is None:
+                continue
+            destinations = [
+                sector for sector in self._connected_sectors(warrior.location)
+                if target is not None and self._moves_toward(warrior.location, sector, target)
+            ]
+            options.append({
+                "name": warrior.name,
+                "current_sector": warrior.location,
+                "connected_sectors": self._connected_sectors(warrior.location),
+                "legal_next_sectors": destinations,
+                "target_sector": target,
+            })
+        return options
+
+    def advance_warriors_toward_target(self, excluded: set[str] | None = None) -> list[str]:
+        """Advance each eligible warrior one legal sector toward XANA's tower."""
+        if not self.state.tower_active or not self.state.active_tower:
+            return []
+        excluded = excluded or set()
+        moved: list[str] = []
+        for option in self.movement_options():
+            name = option["name"]
+            if name in excluded or not option["legal_next_sectors"]:
+                continue
+            destination = option["legal_next_sectors"][0]
+            outcomes = self.move_warriors([name], destination)
+            moved.append(outcomes)
+        return moved
 
     def _sector_distance(self, start: str, target: str) -> int | None:
         if start == target:
@@ -572,9 +692,24 @@ class LyokoSimulator:
             warrior.virtualized = False
             warrior.location = None
             selected.append(name)
+            self.state.devirtualized_warriors.add(name)
         message = f"Devirtualised {', '.join(selected)}."
+        if self._mission_requirements_met() and not self.state.mission_successful:
+            self.state.mission_successful = True
+            message += " Mission objective complete; the tower specialist can now deactivate the tower."
         self.log.append(message)
         return message
+
+    def devirtualize_exhausted_warriors(self) -> str | None:
+        """Remove non-protected virtualised warriors whose health reached zero."""
+        names = [
+            warrior.name
+            for warrior in self.state.warriors.values()
+            if warrior.virtualized and warrior.health == 0 and not self._is_protected_warrior(warrior)
+        ]
+        if not names:
+            return None
+        return self.devirtualize(names)
 
     def return_to_past(self) -> str:
         self.state = self._new_state(return_requested=True)
@@ -815,6 +950,15 @@ def apply_narrator_actions(simulator: LyokoSimulator, reply: str) -> str:
             outcomes.append(simulator.update_warrior_health(name, health))
         except SimulationError as error:
             outcomes.append(f"Health update rejected: {error}")
+    exhausted_outcome = simulator.devirtualize_exhausted_warriors()
+    if exhausted_outcome:
+        outcomes.append(exhausted_outcome)
+    explicitly_moved = {
+        name.strip()
+        for match in re.finditer(r"\[MOVE (.+?) TO [^\]]+\]", reply)
+        for name in match.group(1).split(",")
+    }
+    outcomes.extend(simulator.advance_warriors_toward_target(explicitly_moved))
     if outcomes:
         reply += "\n" + "\n".join(outcomes)
     return re.sub(

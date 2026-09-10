@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import os
 import queue
+import sys
 import threading
 import tkinter as tk
+import traceback
 from tkinter import messagebox, ttk
 
-from lyokosim import LyokoSimulator, SimulationError, TextToSpeech, apply_narrator_actions, create_narrator
+from lyokosim import AccountManager, ConfigManager, LyokoSimulator, SimulationError, TextToSpeech, apply_narrator_actions, create_narrator
 
 
 class LyokoControlRoom(tk.Tk):
@@ -35,6 +37,17 @@ class LyokoControlRoom(tk.Tk):
 
     def __init__(self, model: str | None = None, host: str | None = None, provider: str = "ollama") -> None:
         super().__init__()
+        self.title("LyokoSim // Login")
+        self.geometry("520x570")
+        self.minsize(460, 420)
+        self.configure(bg=self.COLORS["bg"])
+        self._build_styles()
+        self.deiconify()
+        self.account = AccountManager(ConfigManager().directory)
+        self.authenticated = self._show_authentication()
+        if not self.authenticated:
+            self.destroy()
+            return
         self.title("LyokoSim // Jeremy Control Room")
         self.geometry("1220x780")
         self.minsize(1050, 680)
@@ -65,13 +78,61 @@ class LyokoControlRoom(tk.Tk):
         self.dialogue_history: list[str] = []
         self.status_text = tk.StringVar(value="SYSTEMS STANDBY")
         self.integrity_text = tk.StringVar(value="SYSTEM INTEGRITY 100%")
-        self._build_styles()
         self._build_layout()
         self._rebuild_config_controls()
         self._draw_map()
         self.after(100, self._drain_replies)
         self.after(1000, self._refresh_config)
         self.after(250, self._sync_warrior_windows)
+
+    def _show_authentication(self) -> bool:
+        window = tk.Toplevel(self)
+        window.title("LyokoSim // Login")
+        window.geometry("420x330")
+        window.resizable(False, False)
+        window.configure(bg=self.COLORS["bg"])
+        window.transient(self)
+        window.lift()
+        window.focus_force()
+        window.grab_set()
+        result = {"authenticated": False}
+        first_start = not self.account.exists()
+        title = "REGISTER JEREMY ACCOUNT" if first_start else "JEREMY LOGIN"
+        ttk.Label(window, text="LYOKOSIM", style="Title.TLabel").pack(pady=(28, 4))
+        ttk.Label(window, text=title, style="Section.TLabel").pack(pady=(0, 20))
+        form = ttk.Frame(window, style="Panel.TFrame", padding=20)
+        form.pack(fill="both", expand=True, padx=25)
+        ttk.Label(form, text="USERNAME", style="Muted.TLabel").pack(anchor="w")
+        username = ttk.Entry(form)
+        username.pack(fill="x", pady=(4, 12))
+        ttk.Label(form, text="PASSWORD", style="Muted.TLabel").pack(anchor="w")
+        password = ttk.Entry(form, show="*")
+        password.pack(fill="x", pady=(4, 8))
+        error_text = tk.StringVar()
+        ttk.Label(form, textvariable=error_text, style="Muted.TLabel", wraplength=330).pack(anchor="w", pady=(0, 8))
+
+        def submit() -> None:
+            try:
+                if first_start:
+                    self.account.register(username.get(), password.get())
+                elif not self.account.authenticate(username.get(), password.get()):
+                    error_text.set("Login failed. Check username and password.")
+                    return
+            except ValueError as error:
+                error_text.set(str(error))
+                return
+            result["authenticated"] = True
+            window.grab_release()
+            window.destroy()
+
+        ttk.Button(form, text="REGISTER" if first_start else "LOGIN", command=submit, style="Action.TButton").pack(fill="x", pady=(4, 4))
+        ttk.Button(form, text="QUIT", command=window.destroy, style="Danger.TButton").pack(fill="x")
+        password.bind("<Return>", lambda _event: submit())
+        username.focus_set()
+        self.wait_window(window)
+        if result["authenticated"]:
+            self.deiconify()
+        return result["authenticated"]
 
     def _build_styles(self) -> None:
         style = ttk.Style(self)
@@ -231,7 +292,7 @@ class LyokoControlRoom(tk.Tk):
         if warrior is None or not warrior.virtualized:
             return
         key = f"warrior:{name}"
-        window = self._new_window(key, f"Entity // {name}", "330x330")
+        window = self._new_window(key, f"Entity // {name}", "330x360")
         if window is None:
             return
         frame = ttk.Frame(window, style="Panel.TFrame", padding=20)
@@ -240,12 +301,13 @@ class LyokoControlRoom(tk.Tk):
         ttk.Label(frame, text="LYOKO ENTITY CARD", style="Muted.TLabel").pack(anchor="w", pady=(3, 18))
         values = {
             "role": tk.StringVar(),
+            "weapon": tk.StringVar(),
             "sector": tk.StringVar(),
             "health": tk.StringVar(),
             "status": tk.StringVar(),
         }
         self.warrior_card_vars[name] = values
-        for label, key_name in (("ROLE", "role"), ("SECTOR", "sector"), ("HEALTH", "health"), ("STATUS", "status")):
+        for label, key_name in (("ROLE", "role"), ("WEAPON", "weapon"), ("SECTOR", "sector"), ("HEALTH", "health"), ("STATUS", "status")):
             row = ttk.Frame(frame, style="Panel.TFrame")
             row.pack(fill="x", pady=5)
             ttk.Label(row, text=label, style="Section.TLabel", width=10).pack(side="left")
@@ -259,6 +321,7 @@ class LyokoControlRoom(tk.Tk):
         if values is None or warrior is None or not warrior.virtualized:
             return
         values["role"].set(warrior.role)
+        values["weapon"].set(warrior.weapon)
         values["sector"].set(warrior.location or "UNKNOWN")
         values["health"].set(f"{warrior.health}%" + (" // PROTECTED" if self.simulator._is_protected_warrior(warrior) else ""))
         values["status"].set("VIRTUALISED // ACTIVE")
@@ -389,7 +452,8 @@ class LyokoControlRoom(tk.Tk):
             child.destroy()
         for name in self.simulator.warrior_names:
             role = self.simulator.warrior_roles.get(name, "Warrior")
-            ttk.Checkbutton(self.warrior_frame, text=f"{name} // {role}", variable=self.selected_warriors[name]).pack(anchor="w")
+            weapon = self.simulator.warrior_weapons.get(name, "Unknown weapon")
+            ttk.Checkbutton(self.warrior_frame, text=f"{name} // {role} // {weapon}", variable=self.selected_warriors[name]).pack(anchor="w")
         if self.selected_sector.get() not in self.simulator.sectors:
             self.selected_sector.set(self.simulator.sectors[0])
         if self.sector_menu is not None:
@@ -504,8 +568,35 @@ def main() -> None:
     parser.add_argument("--host")
     parser.add_argument("--provider", choices=("ollama", "openai", "none"), default="ollama")
     args = parser.parse_args()
-    app = LyokoControlRoom(args.model, args.host, args.provider)
-    app.mainloop()
+    print(f"LyokoSim starting // provider={args.provider}", flush=True)
+    print("Waiting for the login or registration window...", flush=True)
+    try:
+        app = LyokoControlRoom(args.model, args.host, args.provider)
+        if app.authenticated:
+            print("Authentication successful. Control room online.", flush=True)
+            app.mainloop()
+        else:
+            print("Authentication cancelled. LyokoSim closed.", flush=True)
+    except BaseException:
+        details = traceback.format_exc()
+        appdata = os.getenv("APPDATA") or os.path.expanduser("~/.config")
+        log_directory = os.path.join(appdata, "LyokoSim")
+        os.makedirs(log_directory, exist_ok=True)
+        error_path = os.path.join(log_directory, "startup_error.log")
+        try:
+            with open(error_path, "w", encoding="utf-8") as file:
+                file.write(details)
+        except OSError:
+            pass
+        print(details, file=sys.stderr)
+        try:
+            messagebox.showerror(
+                "LyokoSim startup error",
+                f"LyokoSim could not start.\n\n{details}\nLog saved to:\n{error_path}",
+            )
+        except tk.TclError:
+            pass
+        raise
 
 
 if __name__ == "__main__":

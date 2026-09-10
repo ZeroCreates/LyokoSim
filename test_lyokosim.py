@@ -3,6 +3,7 @@ import unittest
 import json
 
 from lyokosim import (
+    AccountManager,
     ConfigManager,
     LyokoSimulator,
     NoNarrator,
@@ -16,6 +17,18 @@ from lyokosim import (
 class LyokoSimulatorTests(unittest.TestCase):
     def make_simulator(self):
         return LyokoSimulator(ConfigManager(tempfile.mkdtemp()))
+
+    def test_local_account_registers_and_authenticates(self):
+        account = AccountManager(tempfile.mkdtemp())
+        self.assertFalse(account.exists())
+        account.register("Jeremy", "secret")
+        self.assertTrue(account.exists())
+        self.assertTrue(account.authenticate("Jeremy", "secret"))
+        self.assertFalse(account.authenticate("Jeremy", "wrong"))
+        with open(account.path, encoding="utf-8") as file:
+            saved = json.load(file)
+        self.assertNotIn("password", saved)
+        self.assertNotEqual(saved["password_hash"], "secret")
 
     def test_warriors_need_an_active_tower(self):
         simulator = self.make_simulator()
@@ -102,6 +115,38 @@ class LyokoSimulatorTests(unittest.TestCase):
         self.assertNotIn("[MOVE", reply)
         self.assertEqual(simulator.state.warriors["Aelita"].location, "Mountain")
 
+    def test_ai_fallback_moves_warrior_without_move_token(self):
+        simulator = self.make_simulator()
+        simulator.activate_system()
+        simulator.virtualize(["Aelita"], "Forest")
+        simulator.state.active_tower = "Mountain Tower 1"
+        reply = apply_narrator_actions(simulator, "The team advances through Lyoko.")
+        self.assertIn("Moved Aelita", reply)
+        self.assertEqual(simulator.state.warriors["Aelita"].location, "Mountain")
+
+    def test_movement_options_match_connected_route(self):
+        simulator = self.make_simulator()
+        simulator.activate_tower()
+        simulator.virtualize(["Aelita"], "Forest")
+        simulator.state.active_tower = "Mountain Tower 1"
+        options = simulator.narrator_context()["movement_options"]
+        self.assertEqual(options[0]["current_sector"], "Forest")
+        self.assertIn("Mountain", options[0]["connected_sectors"])
+        self.assertIn("Mountain", options[0]["legal_next_sectors"])
+
+    def test_reverse_sector_connection_is_accepted(self):
+        config = ConfigManager(tempfile.mkdtemp())
+        with open(config.sectors_path, "w", encoding="utf-8") as file:
+            json.dump([
+                {"name": "Forest", "towers": 2, "color": "#254638", "connections": []},
+                {"name": "Mountain", "towers": 2, "color": "#38485b", "connections": ["Forest"]},
+            ], file)
+        simulator = LyokoSimulator(config)
+        simulator.activate_system()
+        simulator.virtualize(["Aelita"], "Forest")
+        simulator.state.active_tower = "Mountain Tower 1"
+        self.assertIn("Moved Aelita", simulator.move_warriors(["Aelita"], "Mountain"))
+
     def test_narrator_cannot_move_away_from_active_tower(self):
         simulator = self.make_simulator()
         simulator.activate_tower()
@@ -117,6 +162,8 @@ class LyokoSimulatorTests(unittest.TestCase):
         self.assertEqual(simulator.state.story_length, 10)
         with self.assertRaises(SimulationError):
             simulator.deactivate_tower()
+        simulator.virtualize(["Ulrich"], "Forest")
+        simulator.devirtualize(["Ulrich"])
         for _ in range(simulator.state.story_length):
             simulator.monitor()
         self.assertTrue(simulator.state.mission_successful)
@@ -124,9 +171,24 @@ class LyokoSimulatorTests(unittest.TestCase):
         self.assertFalse(simulator.state.tower_active)
         self.assertIsNone(simulator.state.active_tower)
 
+    def test_mission_completes_when_warrior_exhausts_on_final_monitor(self):
+        simulator = self.make_simulator()
+        simulator.activate_tower()
+        simulator.virtualize(["Ulrich"], "Forest")
+        for _ in range(simulator.state.story_length - 1):
+            simulator.monitor()
+        self.assertFalse(simulator.state.mission_successful)
+        simulator.monitor()
+        reply = apply_narrator_actions(simulator, "Ulrich falls silent at 0% health.")
+        self.assertIn("Devirtualised Ulrich", reply)
+        self.assertTrue(simulator.state.mission_successful)
+        self.assertIn("deactivated", simulator.deactivate_tower())
+
     def test_completed_mission_can_end_without_ai_token(self):
         simulator = self.make_simulator()
         simulator.activate_tower()
+        simulator.virtualize(["Ulrich"], "Forest")
+        simulator.devirtualize(["Ulrich"])
         for _ in range(simulator.state.story_length):
             simulator.monitor()
         self.assertTrue(simulator.state.mission_successful)
@@ -171,6 +233,7 @@ class LyokoSimulatorTests(unittest.TestCase):
         context = simulator.narrator_context()
         self.assertEqual(context["configuration"]["warriors"][0]["name"], "Aelita")
         self.assertIn("role", context["configuration"]["warriors"][0])
+        self.assertIn("weapon", context["configuration"]["warriors"][0])
         self.assertEqual(context["configuration"]["sectors"][0]["name"], "Forest")
         self.assertIn("color", context["configuration"]["sectors"][0])
         self.assertIn("towers", context["configuration"]["sectors"][0])
@@ -184,6 +247,7 @@ class LyokoSimulatorTests(unittest.TestCase):
         )
         self.assertEqual(context["virtualised_warriors"][0]["sector"], "Forest")
         self.assertIn("role", context["virtualised_warriors"][0])
+        self.assertIn("weapon", context["virtualised_warriors"][0])
         self.assertIn("mission_log", context)
         self.assertIn("protected_from_death", context["virtualised_warriors"][0])
         self.assertTrue(context["state"]["warriors"]["Aelita"]["protected_from_death"])
@@ -195,6 +259,16 @@ class LyokoSimulatorTests(unittest.TestCase):
         simulator.state.warriors["Ulrich"].health = 0
         reply = apply_narrator_actions(simulator, "Ulrich is exhausted. [DEVIRTUALISE Ulrich]")
         self.assertIn("Devirtualised Ulrich", reply)
+        self.assertFalse(simulator.state.warriors["Ulrich"].virtualized)
+
+    def test_zero_health_warrior_is_removed_even_without_ai_token(self):
+        simulator = self.make_simulator()
+        simulator.activate_tower()
+        simulator.virtualize(["Ulrich"], "Forest")
+        simulator.state.warriors["Ulrich"].health = 0
+        reply = apply_narrator_actions(simulator, "Ulrich collapses on Lyoko.")
+        self.assertIn("Devirtualised Ulrich", reply)
+        self.assertIn("Ulrich", simulator.state.devirtualized_warriors)
         self.assertFalse(simulator.state.warriors["Ulrich"].virtualized)
 
     def test_narrator_cannot_devirtualise_healthy_or_protected_warriors(self):
@@ -258,10 +332,16 @@ class LyokoSimulatorTests(unittest.TestCase):
         self.assertIn("All warrior names and roles come from the user's configuration and may be completely custom", message)
         self.assertIn("Do not assume any configured warrior is Aelita, Ulrich, Odd, Yumi, William", message)
         self.assertIn("tower specialist, tower deactivator, or tower deactivation specialist performs the Aelita-like objective", message)
+        self.assertIn("Follow the episode guide closely: preserve its setting, sequence, roles", message)
+        self.assertIn("Keep the story original by inventing new scene details", message)
+        self.assertIn("supercomputer is housed in the control room of the abandoned factory", message)
         self.assertIn("Every successful command advances the story", message)
         self.assertIn("A successful monitor command advances the numeric story_progress by exactly one", message)
         self.assertIn("A successful virtualise command is also a story event", message)
         self.assertIn("Do not answer a successful monitor or virtualise command with a bare status report", message)
+        self.assertIn("Reply with story only, plus an action token only when", message)
+        self.assertIn("At least one warrior must be devirtualised before the mission can end", message)
+        self.assertIn("Never claim mission success while devirtualized_warriors is empty", message)
         self.assertIn("every health percentage you say must exactly match the authoritative warrior health", message)
         self.assertIn("If the deterministic outcome or established story gives a different supported health value", message)
         self.assertIn("If no deterministic outcome supports the change, do not update health", message)
